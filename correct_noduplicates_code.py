@@ -2,11 +2,9 @@ import requests
 import base64
 import os
 from dotenv import load_dotenv
-from datetime import date
+from datetime import date, datetime, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, timedelta
-
 
 # --------------------
 # LOAD ENV VARIABLES
@@ -19,13 +17,13 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
 
 if not SMSPORTAL_CLIENT_ID or not SMSPORTAL_API_SECRET:
-    raise ValueError("Missing SMSPortal credentials in .env file")
+    raise ValueError("Missing SMSPortal credentials")
 
 if not GOOGLE_SHEET_ID or not SERVICE_ACCOUNT_FILE:
-    raise ValueError("Missing Google Sheets credentials in .env file")
+    raise ValueError("Missing Google Sheets credentials")
 
 # --------------------
-# MANUAL PAYMENT DETAILS
+# PAYMENT DETAILS
 # --------------------
 BANK_DETAILS = (
     "Bank: FNB\n"
@@ -53,8 +51,13 @@ client = gspread.authorize(creds)
 sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
 rows = sheet.get_all_records()
 
+# Column indexes
+sms_sent_col = sheet.find("SMS SENT").col
+sms_sent_at_col = sheet.find("SMS SENT AT").col
+block_sms_col = sheet.find("BLOCK SMS SENT").col
+
 # --------------------
-# ENCODE SMS CREDENTIALS
+# SMS AUTH
 # --------------------
 credentials = f"{SMSPORTAL_CLIENT_ID}:{SMSPORTAL_API_SECRET}"
 encoded_credentials = base64.b64encode(credentials.encode()).decode()
@@ -67,33 +70,17 @@ HEADERS = {
 }
 
 # --------------------
-# TODAY'S DATE
+# TODAY
 # --------------------
-today = date.today().isoformat()
-print("Sending SMS for date:", today)
+today = date.today()
+print("Running SMS automation for:", today)
 
-# --------------------
-# BUILD MESSAGES FROM GOOGLE SHEET
-# --------------------
 messages = []
 
-# 🔹 ADDED: get SMS SENT column index once
-sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
-rows = sheet.get_all_records()
-
-sms_sent_col = sheet.find("SMS SENT").col
-
-for idx, row in enumerate(rows, start=2):  # 🔹 start=2 because row 1 is header
-
-    # ---- DATE FILTER ----
-    row_date = str(row.get("PAY DATE", "")).strip()
-    if row_date != today:
-        continue
-
-    # 🔹 ADDED: SKIP IF SMS ALREADY SENT
-    sms_sent = str(row.get("SMS SENT", "")).strip().upper()
-    if sms_sent == "YES":
-        continue
+# --------------------
+# PROCESS ROWS
+# --------------------
+for idx, row in enumerate(rows, start=2):
 
     name = str(row.get("CLIENT FULL NAME", "")).strip()
     phone = (
@@ -102,53 +89,100 @@ for idx, row in enumerate(rows, start=2):  # 🔹 start=2 because row 1 is heade
         .replace(" ", "")
         .replace("+", "")
     )
+
+    if not phone or not phone.isdigit():
+        continue
+
+    internet_type = str(row.get("INTERNET TYPE", "")).strip().lower()
+    monthly_fee = str(row.get("MONTHLY FEE", "")).strip()
     reference = str(row.get("REFFERENCE", "")).strip()
-    amount = str(row.get("MONTHLY FEE", "")).strip()
 
-    # ---- INTERNET TYPE ----
-    internet_type_raw = str(row.get("INTERNET TYPE", "")).strip().lower()
+    paid_status = str(row.get("PAID/UNPAID", "")).strip().upper()
+    sms_sent = str(row.get("SMS SENT", "")).strip().upper()
+    block_sms_sent = str(row.get("BLOCK SMS SENT", "")).strip().upper()
+    sms_sent_at = str(row.get("SMS SENT AT", "")).strip()
 
-    if "home" in internet_type_raw or "home/bussiness" in internet_type_raw:
+    # --------------------
+    # DETERMINE PAYMENT LINK
+    # --------------------
+    if "home" in internet_type or "business" in internet_type:
         payment_link = HOME_BUSINESS_PAYMENT_LINK
-    elif "apartment" in internet_type_raw or "flat" in internet_type_raw:
+    elif "apartment" in internet_type or "flat" in internet_type:
         payment_link = APARTMENT_PAYMENT_LINK
     else:
-        print(f"Skipping {name} – unknown internet type: {internet_type_raw}")
         continue
 
-    # ---- PHONE VALIDATION ----
-    if not phone or not phone.isdigit():
-        print(f"Skipping invalid phone number: {phone}")
+    # --------------------
+    # BLOCK SMS (AFTER 2 DAYS)
+    # --------------------
+    if sms_sent_at and paid_status == "UNPAID" and block_sms_sent != "YES":
+        try:
+            sent_date = datetime.strptime(sms_sent_at, "%Y-%m-%d").date()
+            if today >= sent_date + timedelta(days=2):
+
+                block_message = (
+                    f"Hi {name},\n\n"
+                    "Your internet service has been blocked due to non-payment.\n\n"
+                    f"Monthly Fee: R{monthly_fee}\n"
+                    f"Payment Reference: {reference}\n\n"
+                    "Please make payment using the details below:\n\n"
+                    f"{BANK_DETAILS}\n\n"
+                    "Or pay online using this link:\n"
+                    f"{payment_link}\n\n"
+                    "Once payment is received, your internet will be restored.\n\n"
+                    "Thank you."
+                )
+
+                messages.append({
+                    "destination": phone,
+                    "content": block_message
+                })
+
+                sheet.update_cell(idx, block_sms_col, "YES")
+                continue
+        except ValueError:
+            pass
+
+    # --------------------
+    # FIRST REMINDER (PAY DATE)
+    # --------------------
+    pay_date = str(row.get("PAY DATE", "")).strip()
+    if pay_date != today.isoformat():
         continue
 
-    # ---- MESSAGE ----
-    message_text = (
+    # 🔹 DO NOT MESSAGE PAID CLIENTS
+    if paid_status != "UNPAID":
+        continue
+
+    if sms_sent == "YES":
+        continue
+
+    reminder_message = (
         f"Hi {name}, this is a friendly reminder to please pay for your internet service.\n\n"
-        f"Payment Reference: {reference}\n\n"
-        f"{f'Amount Due: R{amount}\n\n' if amount else ''}"
+        f"Payment Reference: {reference}\n"
+        f"Amount Due: R{monthly_fee}\n\n"
         "You can make payment using either option below:\n\n"
-        "👉 Bank Details:\n"
         f"{BANK_DETAILS}\n\n"
-        "👉 Or pay online using this link:\n"
+        "Or pay online using this link:\n"
         f"{payment_link}\n\n"
         "Thank you."
     )
 
     messages.append({
         "destination": phone,
-        "content": message_text
+        "content": reminder_message
     })
 
-    # 🔹 ADDED: MARK SMS AS SENT
     sheet.update_cell(idx, sms_sent_col, "YES")
-
-if not messages:
-    print("No new SMS to send today.")
-    exit()
+    sheet.update_cell(idx, sms_sent_at_col, today.isoformat())
 
 # --------------------
 # SEND SMS
 # --------------------
+if not messages:
+    print("No SMS to send today.")
+    exit()
+
 payload = {
     "messages": messages,
     "sender_id": "SANDAV"
