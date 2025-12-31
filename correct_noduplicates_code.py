@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from datetime import date
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime, timedelta
+
 
 # --------------------
 # LOAD ENV VARIABLES
