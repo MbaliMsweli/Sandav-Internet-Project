@@ -51,8 +51,11 @@ creds = ServiceAccountCredentials.from_json_keyfile_name(
 )
 client = gspread.authorize(creds)
 
-sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
-rows = sheet.get_all_records()  # list of dictionaries
+spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+
+sheet = spreadsheet.worksheet("January 2026")
+
+rows = sheet.get_all_records()
 
 # --------------------
 # ENCODE SMS CREDENTIALS
