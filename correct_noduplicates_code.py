@@ -48,8 +48,12 @@ creds = ServiceAccountCredentials.from_json_keyfile_name(
 )
 client = gspread.authorize(creds)
 
-sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+
+sheet = spreadsheet.worksheet("January 2026")
+
 rows = sheet.get_all_records()
+
 
 # Column indexes
 sms_sent_col = sheet.find("SMS SENT").col
@@ -129,7 +133,7 @@ for idx, row in enumerate(rows, start=2):
                     f"{BANK_DETAILS}\n\n"
                     "Or pay online using this link:\n"
                     f"{payment_link}\n\n"
-                    "Once payment is received, your internet will be restored.\n\n"
+                    "Once payment is received, your internet will be restored. Please ignore this if you've paid already\n\n"
                     "Thank you."
                 )
 
